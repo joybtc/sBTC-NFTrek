@@ -126,3 +126,109 @@
         (ok (map-set location-status location-id active))
     )
 )
+
+
+;; Core Functions
+(define-public (complete-activity (location-id uint) (user-lat uint) (user-long uint))
+    (let ((location (unwrap! (map-get? locations location-id) err-invalid-location))
+          (completion-key { user: tx-sender, location-id: location-id }))
+
+        (asserts! (validate-coordinates user-lat user-long) err-invalid-coordinates)
+        (asserts! (not (default-to false (get completed (map-get? user-completions completion-key)))) 
+                 err-already-completed)
+        (asserts! (validate-location-active location-id) err-location-disabled)
+        (asserts! (<= (calculate-distance user-lat user-long 
+                                        (get lat location) 
+                                        (get long location)) 
+                     min-distance)
+                 err-invalid-location)
+
+        (map-set user-completions 
+            completion-key 
+            { completed: true,
+              timestamp: stacks-block-height }
+        )
+
+        (map-set user-points 
+            tx-sender 
+            (+ (default-to u0 (map-get? user-points tx-sender))
+               (get reward-points location))
+        )
+
+        (ok true)
+    )
+)
+
+(define-public (mint-nft (token-id uint))
+    (let ((user-point-balance (default-to u0 (map-get? user-points tx-sender))))
+        (asserts! (validate-token-id token-id) err-invalid-token-id)
+        (asserts! (>= user-point-balance points-threshold) err-insufficient-points)
+        (asserts! (not (default-to false (map-get? minted-nfts token-id))) err-nft-already-minted)
+
+        (map-set user-points 
+            tx-sender 
+            (- user-point-balance points-threshold))
+
+        (map-set minted-nfts token-id true)    
+        (nft-mint? geotagged-nft token-id tx-sender)
+    )
+)
+
+;; Points Transfer Function
+(define-public (transfer-points (recipient principal) (amount uint))
+    (let (
+        (sender-balance (get-user-points tx-sender))
+        (recipient-balance (get-user-points recipient))
+    )
+        (asserts! (validate-amount amount) err-zero-amount)
+        (asserts! (validate-user recipient) err-invalid-user)
+        (asserts! (>= sender-balance amount) err-insufficient-points)
+
+        ;; Update sender balance
+        (map-set user-points 
+            tx-sender 
+            (- sender-balance amount))
+
+        ;; Update recipient balance
+        (map-set user-points 
+            recipient 
+            (+ recipient-balance amount))
+
+        (ok true)
+    )
+)
+
+;; Read-only Functions
+(define-read-only (get-location (id uint))
+    (map-get? locations id)
+)
+
+(define-read-only (get-user-points (user principal))
+    (default-to u0 (map-get? user-points user))
+)
+
+(define-read-only (get-completion-status (user principal) (location-id uint))
+    (get completed (default-to 
+        { completed: false, timestamp: u0 }
+        (map-get? user-completions { user: user, location-id: location-id })))
+)
+
+(define-read-only (is-nft-minted (token-id uint))
+    (default-to false (map-get? minted-nfts token-id))
+)
+
+(define-read-only (get-location-status (location-id uint))
+    (default-to false (map-get? location-status location-id))
+)
+
+;; Get simplified user stats
+(define-read-only (get-user-stats (user principal))
+    (let (
+        (total-points (get-user-points user))
+    )
+        (ok {
+            points-balance: total-points,
+            can-mint-nft: (>= total-points points-threshold)
+        })
+    )
+)
